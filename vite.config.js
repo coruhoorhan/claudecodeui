@@ -9,7 +9,9 @@ export default defineConfig(({ command, mode }) => {
   return {
     plugins: [react()],
     server: {
+      host: '0.0.0.0',
       port: parseInt(env.VITE_PORT) || 3009,
+      allowedHosts: ['cod.ulakx.com', 'localhost', '10.0.12.55'],
       proxy: {
         '/api': `http://localhost:${env.PORT || 3008}`,
         '/ws': {
