@@ -141,6 +141,8 @@ function getServerIP() {
 const app = express();
 const server = http.createServer(app);
 
+app.set('trust proxy', 1); // For ERR_ERL_UNEXPECTED_X_FORWARDED_FOR warning, trusts one proxy
+
 // Session Middleware Setup
 // Critical: Ensure a strong session secret is set
 if (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 32) {
