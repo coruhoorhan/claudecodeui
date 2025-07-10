@@ -139,7 +139,8 @@ function CodeEditor({ file, onClose, projectPath }) {
       try {
         setLoading(true);
         
-        const response = await fetch(`/api/projects/${file.projectName}/file?filePath=${encodeURIComponent(file.path)}`);
+        const relativeFilePath = file.path.substring(projectPath.length + 1);
+        const response = await fetch(`/api/projects/${file.projectName}/file?filePath=${encodeURIComponent(relativeFilePath)}`);
         
         if (!response.ok) {
           throw new Error(`Failed to load file: ${response.status} ${response.statusText}`);
@@ -182,7 +183,7 @@ function CodeEditor({ file, onClose, projectPath }) {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          filePath: file.path,
+          filePath: relativeFilePath,
           content: content
         })
       });

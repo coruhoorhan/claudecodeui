@@ -21,6 +21,8 @@ console.log('PORT from env:', process.env.PORT);
 
 const express = require('express');
 const { WebSocketServer } = require('ws');
+const crypto = require('crypto');
+const rateLimit = require('express-rate-limit');
 const http = require('http');
 const path = require('path');
 const cors = require('cors');
@@ -140,8 +142,15 @@ const app = express();
 const server = http.createServer(app);
 
 // Session Middleware Setup
+// Critical: Ensure a strong session secret is set
+if (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 32) {
+  console.error('❌ FATAL ERROR: SESSION_SECRET is not defined or is too weak. Please set a long, random string in your .env file.');
+  process.exit(1);
+}
+
+// Session Middleware Setup
 const sessionMiddleware = session({
-  secret: process.env.SESSION_SECRET || 'default-secret-key',
+  secret: process.env.SESSION_SECRET,
   resave: false,
   saveUninitialized: true,
   cookie: { secure: process.env.NODE_ENV === 'production', maxAge: 86400000 } // 24 hours
@@ -172,14 +181,41 @@ app.use(cookieParser());
 app.use(sessionMiddleware);
 
 // Auth Routes
-app.post('/api/login', (req, res) => {
+// Brute-force protection for login
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10, // Limit each IP to 10 login requests per windowMs
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many login attempts. Please try again later.' },
+});
+
+app.post('/api/login', loginLimiter, (req, res) => {
   const { password } = req.body;
-  if (password && password === process.env.APP_PASSWORD) {
-    req.session.isAuthenticated = true;
-    res.json({ success: true });
-  } else {
-    res.status(401).json({ success: false, message: 'Invalid password' });
+  const appPassword = process.env.APP_PASSWORD;
+
+  if (!appPassword) {
+    return res.status(500).json({ success: false, message: 'Application password is not configured on the server.' });
   }
+  
+  if (password) {
+    try {
+      const passwordBuffer = Buffer.from(password, 'utf8');
+      const appPasswordBuffer = Buffer.from(appPassword, 'utf8');
+
+      if (
+        passwordBuffer.length === appPasswordBuffer.length &&
+        crypto.timingSafeEqual(passwordBuffer, appPasswordBuffer)
+      ) {
+        req.session.isAuthenticated = true;
+        return res.json({ success: true });
+      }
+    } catch (e) {
+      return res.status(500).json({ success: false, message: 'An error occurred during authentication.' });
+    }
+  }
+  
+  res.status(401).json({ success: false, message: 'Invalid password' });
 });
 
 app.post('/api/logout', (req, res) => {
@@ -196,7 +232,46 @@ app.get('/api/auth/status', (req, res) => {
   res.json({ isAuthenticated: !!req.session.isAuthenticated });
 });
 
+// Security helper to ensure a file path is safe and within a project's directory
+async function getSafeFilePath(projectName, unsafeRelativePath) {
+    if (!unsafeRelativePath || typeof unsafeRelativePath !== 'string') {
+        const err = new Error('Invalid file path provided.');
+        err.code = 'EBADPATH';
+        throw err;
+    }
+
+    const projectDir = await extractProjectDirectory(projectName);
+    const resolvedPath = path.resolve(projectDir, unsafeRelativePath);
+
+    // Crucial security check: Ensure the resolved path is inside the project directory
+    if (!resolvedPath.startsWith(projectDir + path.sep)) {
+         const err = new Error('Permission denied or invalid path');
+         err.code = 'EACCES';
+         throw err;
+    }
+    return resolvedPath;
+}
+
 // Middleware to protect routes
+async function getSafeFilePath(projectName, unsafeRelativePath) {
+    if (!unsafeRelativePath || typeof unsafeRelativePath !== 'string') {
+        const err = new Error('Invalid file path provided.');
+        err.code = 'EBADPATH';
+        throw err;
+    }
+
+    const projectDir = await extractProjectDirectory(projectName);
+    const resolvedPath = path.resolve(projectDir, unsafeRelativePath);
+
+    // Crucial security check: Ensure the resolved path is inside the project directory
+    if (!resolvedPath.startsWith(projectDir + path.sep)) {
+         const err = new Error('Permission denied or invalid path');
+         err.code = 'EACCES';
+         throw err;
+    }
+    return resolvedPath;
+}
+
 const isAuthenticated = (req, res, next) => {
   if (req.session.isAuthenticated) {
     return next();
@@ -308,19 +383,14 @@ app.post('/api/projects/create', isAuthenticated, async (req, res) => {
 app.get('/api/projects/:projectName/file', isAuthenticated, async (req, res) => {
   try {
     const { projectName } = req.params;
-    const { filePath } = req.query;
+    const { filePath } = req.query; // This should be a relative path
     
     console.log('📄 File read request:', projectName, filePath);
     
-    const fs = require('fs').promises;
-    
-    // Security check - ensure the path is safe and absolute
-    if (!filePath || !path.isAbsolute(filePath)) {
-      return res.status(400).json({ error: 'Invalid file path' });
-    }
-    
-    const content = await fs.readFile(filePath, 'utf8');
-    res.json({ content, path: filePath });
+    const safePath = await getSafeFilePath(projectName, filePath);
+    const content = await fs.readFile(safePath, 'utf8');
+
+    res.json({ content, path: safePath }); // Return the safe, absolute path
   } catch (error) {
     console.error('Error reading file:', error);
     if (error.code === 'ENOENT') {
@@ -341,23 +411,14 @@ app.get('/api/projects/:projectName/files/content', isAuthenticated, async (req,
     
     console.log('🖼️ Binary file serve request:', projectName, filePath);
     
-    const fs = require('fs');
     const mime = require('mime-types');
-    
-    // Security check - ensure the path is safe and absolute
-    if (!filePath || !path.isAbsolute(filePath)) {
-      return res.status(400).json({ error: 'Invalid file path' });
-    }
-    
-    // Check if file exists
-    try {
-      await fs.promises.access(filePath);
-    } catch (error) {
-      return res.status(404).json({ error: 'File not found' });
-    }
+    const safePath = await getSafeFilePath(projectName, filePath);
+
+    // Check if file exists (getSafeFilePath does not check existence)
+    await fs.access(safePath);
     
     // Get file extension and set appropriate content type
-    const mimeType = mime.lookup(filePath) || 'application/octet-stream';
+    const mimeType = mime.lookup(safePath) || 'application/octet-stream';
     res.setHeader('Content-Type', mimeType);
     
     // Stream the file
@@ -387,32 +448,29 @@ app.put('/api/projects/:projectName/file', isAuthenticated, async (req, res) => 
     
     console.log('💾 File save request:', projectName, filePath);
     
-    const fs = require('fs').promises;
-    
-    // Security check - ensure the path is safe and absolute
-    if (!filePath || !path.isAbsolute(filePath)) {
-      return res.status(400).json({ error: 'Invalid file path' });
-    }
+    const safePath = await getSafeFilePath(projectName, filePath);
     
     if (content === undefined) {
       return res.status(400).json({ error: 'Content is required' });
     }
     
-    // Create backup of original file
+    // Create backup of original file before writing
     try {
-      const backupPath = filePath + '.backup.' + Date.now();
-      await fs.copyFile(filePath, backupPath);
-      console.log('📋 Created backup:', backupPath);
+        if (require('fs').existsSync(safePath)) {
+            const backupPath = safePath + '.backup.' + Date.now();
+            await fs.copyFile(safePath, backupPath);
+            console.log('📋 Created backup:', backupPath);
+        }
     } catch (backupError) {
       console.warn('Could not create backup:', backupError.message);
     }
     
     // Write the new content
-    await fs.writeFile(filePath, content, 'utf8');
+    await fs.writeFile(safePath, content, 'utf8');
     
     res.json({ 
       success: true, 
-      path: filePath,
+      path: safePath,
       message: 'File saved successfully' 
     });
   } catch (error) {

@@ -2,8 +2,9 @@ import React from 'react';
 import { Button } from './ui/button';
 import { X } from 'lucide-react';
 
-function ImageViewer({ file, onClose }) {
-  const imagePath = `/api/projects/${file.projectName}/files/content?path=${encodeURIComponent(file.path)}`;
+function ImageViewer({ file, onClose, projectPath }) {
+  const relativeFilePath = file.path.substring(projectPath.length + 1);
+  const imagePath = `/api/projects/${file.projectName}/files/content?path=${encodeURIComponent(relativeFilePath)}`;
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
